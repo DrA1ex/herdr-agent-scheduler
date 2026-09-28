@@ -1,0 +1,51 @@
+id = "codex.scheduler"
+name = "Codex & Claude Scheduler"
+version = "0.4.0"
+min_herdr_version = "0.8.0"
+description = "Schedule and manage prompts for live Codex and Claude Code sessions in Herdr panes."
+platforms = ["macos"]
+
+[[startup]]
+command = ["python3", "scripts/daemon.py", "start"]
+
+[[actions]]
+id = "manage"
+title = "Codex & Claude Scheduler"
+description = "Open the scheduler manager for the current pane."
+contexts = ["pane"]
+command = ["bash", "scripts/open-manager.sh"]
+
+# Compatibility aliases for 0.1.x and for users who learned the old action names.
+[[actions]]
+id = "schedule"
+title = "Schedule agent prompt"
+description = "Open the scheduler manager for Codex or Claude Code."
+contexts = ["pane"]
+command = ["bash", "scripts/open-manager.sh"]
+
+[[actions]]
+id = "jobs"
+title = "Scheduled agent prompts"
+description = "Open the scheduler manager for Codex or Claude Code."
+contexts = ["pane"]
+command = ["bash", "scripts/open-manager.sh"]
+
+[[actions]]
+id = "start-daemon"
+title = "Start scheduler daemon"
+description = "Ensure the scheduler daemon is running."
+command = ["python3", "scripts/daemon.py", "start"]
+
+[[actions]]
+id = "stop-daemon"
+title = "Stop scheduler daemon"
+description = "Stop the scheduler daemon."
+command = ["python3", "scripts/daemon.py", "stop"]
+
+[[panes]]
+id = "manager"
+title = "Codex & Claude Scheduler"
+placement = "popup"
+width = "86%"
+height = "78%"
+command = ["python3", "scripts/manager_ui.py"]

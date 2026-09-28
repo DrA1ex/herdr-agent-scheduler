@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+BEGIN = "# >>> codex.scheduler keybinding >>>"
+END = "# <<< codex.scheduler keybinding <<<"
+
+
+def config_path() -> Path:
+    return Path.home() / ".config" / "herdr" / "config.toml"
+
+
+def toml_quote(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def block(root: Path) -> str:
+    del root
+    return f'''{BEGIN}
+[[keys.command]]
+key = "prefix+s"
+type = "plugin_action"
+command = "codex.scheduler.manage"
+description = "Codex & Claude Scheduler"
+{END}
+'''
+
+
+def install(root: Path) -> int:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    new_block = block(root)
+    if BEGIN in text and END in text:
+        start = text.index(BEGIN)
+        finish = text.index(END, start) + len(END)
+        text = text[:start].rstrip() + "\n\n" + new_block + text[finish:].lstrip("\n")
+    else:
+        if 'key = "prefix+s"' in text:
+            print("warning: prefix+s already exists in Herdr config; keybinding not added")
+            print("use: herdr plugin action invoke codex.scheduler.manage")
+            return 0
+        text = text.rstrip() + ("\n\n" if text.strip() else "") + new_block
+    path.write_text(text, encoding="utf-8")
+    print(f"installed Codex & Claude Scheduler plugin-action keybinding in {path}")
+    return 0
+
+
+def uninstall() -> int:
+    path = config_path()
+    if not path.exists():
+        return 0
+    text = path.read_text(encoding="utf-8")
+    if BEGIN not in text or END not in text:
+        return 0
+    start = text.index(BEGIN)
+    finish = text.index(END, start) + len(END)
+    new_text = (text[:start].rstrip() + "\n" + text[finish:].lstrip("\n")).strip()
+    path.write_text((new_text + "\n") if new_text else "", encoding="utf-8")
+    print(f"removed keybinding from {path}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["install", "uninstall"])
+    parser.add_argument("--root", default=str(Path(__file__).resolve().parents[1]))
+    args = parser.parse_args()
+    return install(Path(args.root).resolve()) if args.action == "install" else uninstall()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
