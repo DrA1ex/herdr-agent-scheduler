@@ -100,6 +100,9 @@ def ellipsis(value: str | None, width: int) -> str:
     return head + "…"
 
 
+LINE_BREAK_GLYPH = "↵"
+
+
 @dataclass
 class LineBuffer:
     chars: list[str]
@@ -125,6 +128,12 @@ class LineBuffer:
         chunk = list(clean)
         self.chars[self.cursor:self.cursor] = chunk
         self.cursor += len(chunk)
+
+    def insert_line_break(self) -> None:
+        # Kept as a real newline in the stored prompt so delivery keeps the
+        # multi-line text; the field shows it as LINE_BREAK_GLYPH.
+        self.chars[self.cursor:self.cursor] = ["\n"]
+        self.cursor += 1
 
     def backspace(self) -> None:
         if self.cursor <= 0:
@@ -167,7 +176,8 @@ class LineBuffer:
         if not self.chars:
             return ellipsis(placeholder, width), 0
 
-        text = self.value
+        # One glyph per character, so cursor offsets are unchanged.
+        text = self.value.replace("\n", LINE_BREAK_GLYPH)
         left = text[:self.cursor]
         right = text[self.cursor:]
         if _cell_width(text) <= width:
@@ -850,7 +860,8 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
         save_x = max(cancel_x + 12, width - 13)
         _safe_addstr(win, buttons_y, cancel_x, "[ Cancel ]", cancel_attr)
         _safe_addstr(win, buttons_y, save_x, "[ Save ]", save_attr)
-        _safe_addstr(win, height - 1, 0, ellipsis("Tab/↑↓ move  Enter activate  Esc back", content_width), curses.A_DIM)
+        hint = "Tab/↑↓ move  Enter new line  Esc back" if focus == 1 else "Tab/↑↓ move  Enter activate  Esc back"
+        _safe_addstr(win, height - 1, 0, ellipsis(hint, content_width), curses.A_DIM)
         win.refresh()
         _set_cursor(focus in (0, 1))
 
@@ -886,6 +897,12 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
             continue
         if key in (curses.KEY_BTAB, curses.KEY_UP):
             focus = (focus - 1) % 4
+            continue
+        # Inside Prompt, Enter is a line break: a pasted multi-line text arrives
+        # as Enter keys, so it must not submit the form. Save is Tab + Enter.
+        if focus == 1 and key in ("\n", "\r", curses.KEY_ENTER):
+            prompt_buffer.insert_line_break()
+            error = None
             continue
         if focus in (0, 1) and _field_key(when_buffer if focus == 0 else prompt_buffer, key):
             error = None

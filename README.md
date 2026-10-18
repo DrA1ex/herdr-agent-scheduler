@@ -44,9 +44,11 @@ Reload Herdr's configuration with `prefix+Shift+R`, or detach and reattach the c
 ## Schedule a prompt
 
 1. Focus your Codex or Claude Code pane.
-2. Press **`prefix+s`**. With Herdr's default prefix: `Ctrl+B`, release, then `s`.
+2. Press **`prefix+s`**. With Herdr's default prefix: `Ctrl+B`, release, then `s`. The installer turns on
+   Herdr's `switch_ascii_input_source_in_prefix`, so `s` works in any keyboard layout (macOS).
 3. Check the **Target** line, then choose **New**.
-4. Enter a time and a prompt, then choose **Save**. An empty prompt uses `Continue`.
+4. Enter a time and a prompt, then choose **Save** (Tab to it, then Enter). An empty prompt uses `Continue`.
+   In the prompt, Enter starts a new line, so multi-line text can be pasted as is; the field shows each line break as `↵`.
 5. Close the popup and leave the agent session open.
 
 When the time arrives, the worker waits for `idle` or `done` and submits your prompt through Herdr.

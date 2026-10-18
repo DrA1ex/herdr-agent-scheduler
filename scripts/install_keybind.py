@@ -5,6 +5,7 @@ from pathlib import Path
 
 BEGIN = "# >>> codex.scheduler keybinding >>>"
 END = "# <<< codex.scheduler keybinding <<<"
+ASCII_PREFIX_KEY = "switch_ascii_input_source_in_prefix"
 
 
 def config_path() -> Path:
@@ -27,10 +28,31 @@ description = "Codex & Claude Scheduler"
 '''
 
 
+def ensure_ascii_prefix(text: str) -> str:
+    """Enable Herdr's ASCII input switch so prefix+s works on any keyboard layout.
+
+    Without it, the `s` after the prefix is typed in the active (e.g. Russian)
+    layout and Herdr does not see the binding.
+    """
+    flag = f"{ASCII_PREFIX_KEY} = true"
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.strip().startswith(ASCII_PREFIX_KEY):
+            lines[index] = flag
+            return "\n".join(lines)
+    for index, line in enumerate(lines):
+        if line.strip() == "[experimental]":
+            lines.insert(index + 1, flag)
+            return "\n".join(lines)
+    separator = "\n\n" if text.strip() else ""
+    return text.rstrip() + separator + "[experimental]\n" + flag + "\n"
+
+
 def install(root: Path) -> int:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     text = path.read_text(encoding="utf-8") if path.exists() else ""
+    text = ensure_ascii_prefix(text)
     new_block = block(root)
     if BEGIN in text and END in text:
         start = text.index(BEGIN)

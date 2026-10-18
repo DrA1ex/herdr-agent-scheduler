@@ -405,6 +405,23 @@ class LineBufferTests(unittest.TestCase):
         self.assertEqual(visible, "[Continue]")
         self.assertEqual(cursor, 0)
 
+    def test_line_break_is_stored_as_newline_and_shown_as_glyph(self):
+        b = manager_ui.LineBuffer.from_text("first")
+        b.insert_line_break()
+        b.insert("second")
+        self.assertEqual(b.value, "first\nsecond")
+        visible, cursor = b.viewport(40)
+        self.assertEqual(visible, "first" + manager_ui.LINE_BREAK_GLYPH + "second")
+        self.assertEqual(cursor, len(visible))
+
+    def test_cursor_stays_correct_after_line_break_in_middle(self):
+        b = manager_ui.LineBuffer.from_text("ab")
+        b.left()
+        b.insert_line_break()
+        self.assertEqual(b.value, "a\nb")
+        _visible, cursor = b.viewport(40)
+        self.assertEqual(cursor, 2)
+
 
 class FakeWindow:
     def __init__(self, keys: list[Any] | None = None, rows: int = 36, cols: int = 100):
@@ -669,20 +686,37 @@ class ManagerFlowTests(unittest.TestCase):
                 mock.patch.object(manager_ui, "_refresh_metadata"), \
                 mock.patch.object(manager_ui, "_notify") as notify, \
                 mock.patch.object(curses, "curs_set", side_effect=curses.error):
-            win = FakeWindow(["\n", "\n", "\n"], rows=36, cols=100)
+            win = FakeWindow(["\n", "\t", "\t", "\n"], rows=36, cols=100)
             _banner, job_id = manager_ui._schedule_form(win, "w1:p1", claude)
             job = read_jobs()[0]
             self.assertEqual(job_id, job["id"])
             self.assertEqual(job["target"]["agent"], "claude")
             notify.assert_called_with("Claude Code prompt scheduled", mock.ANY)
 
-            win = FakeWindow(["\n", "\x15", *list("Run tests"), "\n", "\n"], rows=36, cols=100)
+            win = FakeWindow(["\n", "\x15", *list("Run tests"), "\t", "\t", "\n"], rows=36, cols=100)
             manager_ui._schedule_form(win, "w2:p1", codex, job)
             saved = read_jobs()[0]
             self.assertEqual(saved["prompt"], "Run tests")
             self.assertEqual(saved["target"], job["target"])
             self.assertEqual(saved["pane"], "w1:p1")
             notify.assert_called_with("Claude Code schedule updated", mock.ANY)
+
+    def test_multiline_paste_in_prompt_does_not_submit_the_form(self):
+        codex = {"agent": "codex", "agent_status": "idle", "foreground_cwd": "/tmp/project",
+                 "agent_session": {"agent": "codex", "kind": "id", "value": "codex-session"}}
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": td}), \
+                mock.patch.object(manager_ui, "ensure_daemon"), \
+                mock.patch.object(manager_ui, "_refresh_metadata"), \
+                mock.patch.object(manager_ui, "_notify"), \
+                mock.patch.object(curses, "curs_set", side_effect=curses.error):
+            # Pasted text arrives as characters and Enter keys; the Enter keys
+            # between lines must stay inside the prompt.
+            pasted = ["Fix", "\r", "the", "\n", "tests"]
+            win = FakeWindow(["\n", *pasted, "\t", "\t", "\n"], rows=36, cols=100)
+            manager_ui._schedule_form(win, "w1:p1", codex)
+            job = read_jobs()[0]
+            self.assertEqual(job["prompt"], "Fix\nthe\ntests")
 
     def test_create_edit_cancel_delete_without_job_numbers(self):
         with tempfile.TemporaryDirectory() as td:
@@ -693,9 +727,9 @@ class ManagerFlowTests(unittest.TestCase):
                 "agent_session": {"agent": "codex", "kind": "id", "value": "sess"},
             }
             # New: replace default 15h with 1h, accept Continue, Save.
-            keys: list[Any] = ["n", "\x15", "1", "h", "\n", "\n", "\n"]
+            keys: list[Any] = ["n", "\x15", "1", "h", "\n", "\t", "\t", "\n"]
             # Edit selected job: replace When with 30m, replace prompt with Retry, Save.
-            keys += ["e", "\x15", "3", "0", "m", "\n", "\x15"] + list("Retry") + ["\n", "\n"]
+            keys += ["e", "\x15", "3", "0", "m", "\n", "\x15"] + list("Retry") + ["\t", "\t", "\n"]
             # Cancel and Delete both use selectable No/Yes dialogs, defaulting to No.
             keys += ["c", curses.KEY_RIGHT, "\n", "d", curses.KEY_RIGHT, "\n", "\x1b"]
             win = FakeWindow(keys, rows=40, cols=110)
@@ -938,7 +972,9 @@ class RealPtyCursesSmokeTest(unittest.TestCase):
                 start = len(output)
                 # Curses may only redraw changed cells; the Prompt label was
                 # already rendered when the form opened and need not reappear.
-                os.write(master, b"\x15" + b"15x\x7fh\r\r\r")
+                # Enter leaves the Prompt field as a line break, so Save is reached
+                # with Tab presses before the final Enter.
+                os.write(master, b"\x15" + b"15x\x7fh\r" + b"\t\t" + b"\r")
                 self.assertTrue(wait_for(b"Scheduled for", start))
 
                 os.write(master, b"\x1b")
@@ -965,6 +1001,33 @@ class RealPtyCursesSmokeTest(unittest.TestCase):
                     proc.kill()
                     proc.wait()
                 os.close(master)
+
+
+class AsciiPrefixConfigTests(unittest.TestCase):
+    FLAG = "switch_ascii_input_source_in_prefix = true"
+
+    def test_adds_flag_under_existing_experimental_section(self):
+        text = '[keys]\nprefix = "ctrl+b"\n\n[experimental]\npane_history = false\n'
+        out = install_keybind.ensure_ascii_prefix(text)
+        self.assertIn(f"[experimental]\n{self.FLAG}\npane_history = false", out)
+
+    def test_replaces_existing_false_value(self):
+        text = "[experimental]\nswitch_ascii_input_source_in_prefix = false\n"
+        out = install_keybind.ensure_ascii_prefix(text)
+        self.assertEqual(out.count("switch_ascii_input_source_in_prefix"), 1)
+        self.assertIn(self.FLAG, out)
+
+    def test_leaves_commented_default_alone(self):
+        text = "[experimental]\n# switch_ascii_input_source_in_prefix = false\n"
+        out = install_keybind.ensure_ascii_prefix(text)
+        self.assertIn(f"[experimental]\n{self.FLAG}\n# switch_ascii_input_source_in_prefix = false", out)
+
+    def test_creates_section_when_missing(self):
+        out = install_keybind.ensure_ascii_prefix('[ui]\nx = 1\n')
+        self.assertEqual(out, '[ui]\nx = 1\n\n[experimental]\n' + self.FLAG + "\n")
+
+    def test_empty_config_gets_only_the_section(self):
+        self.assertEqual(install_keybind.ensure_ascii_prefix(""), "[experimental]\n" + self.FLAG + "\n")
 
 
 class PackagingAndKeybindingTests(unittest.TestCase):
