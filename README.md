@@ -48,7 +48,7 @@ Reload Herdr's configuration with `prefix+Shift+R`, or detach and reattach the c
    Herdr's `switch_ascii_input_source_in_prefix`, so `s` works in any keyboard layout (macOS).
 3. Check the **Target** line, then choose **New**.
 4. Enter a time and a prompt, then choose **Save** (Tab to it, then Enter). An empty prompt uses `Continue`.
-   In the prompt, Enter starts a new line, so multi-line text can be pasted as is; the field shows each line break as `↵`.
+   In the prompt, Enter starts a new line, so multi-line text can be pasted as is. The prompt shows three lines and scrolls to keep the cursor visible.
 5. Close the popup and leave the agent session open.
 
 When the time arrives, the worker waits for `idle` or `done` and submits your prompt through Herdr.
@@ -78,7 +78,7 @@ Times use your machine's local timezone. Each schedule sends one prompt.
 | New / Edit / Cancel / Delete / Details | `N` / `E` / `C` / `D` / `V` |
 | Close | `Q` or `Esc` |
 
-Forms support ordinary cursor movement, Backspace, Delete, Home and End. `Esc` returns to the previous view.
+Forms support ordinary cursor movement, Backspace, Delete, Home and End. `Option` (or `Alt`) with `←` / `→` moves by word, and `Option` with Backspace deletes a word; these do not leave the view. `Esc` returns to the previous view. Shortcut letters also work on Russian and other non-Latin keyboard layouts, by key position.
 
 **Cancel** stops delivery and keeps a history record. **Delete** removes the record permanently. Editing a job
 preserves its original target even if you open the manager from a different pane.

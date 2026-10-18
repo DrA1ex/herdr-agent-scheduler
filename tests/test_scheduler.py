@@ -517,6 +517,9 @@ class FakeWindow:
             raise curses.error("no input")
         return self.keys.pop(0)
 
+    def unget_wch(self, key):
+        self.keys.insert(0, key)
+
 
 class CursesInputTests(unittest.TestCase):
     def test_typing_and_backspace_stays_on_one_row(self):
@@ -559,6 +562,86 @@ class CursesInputTests(unittest.TestCase):
         with self.assertRaises(manager_ui.EscapePressed):
             manager_ui.read_field(win, 5, "Prompt: ")
         self.assertEqual(win.keys, ["\x1b"])
+
+
+class KeyLayoutAndOptionKeyTests(unittest.TestCase):
+    def test_russian_letters_map_to_the_latin_key_in_the_same_position(self):
+        self.assertEqual(manager_ui._latin_key("т"), "n")
+        self.assertEqual(manager_ui._latin_key("Т"), "n")
+        self.assertEqual(manager_ui._latin_key("й"), "q")
+        self.assertEqual(manager_ui._latin_key("о"), "j")
+        self.assertEqual(manager_ui._latin_key("x"), "x")
+        self.assertEqual(manager_ui._latin_key(curses.KEY_DOWN), curses.KEY_DOWN)
+
+    def test_option_backspace_erases_a_word_without_closing(self):
+        win = FakeWindow(["h", "i", " ", "x", "\x1b", "\x7f", "\n"])
+        self.assertEqual(manager_ui.read_field(win, 5, "Prompt: "), "hi ")
+
+    def test_option_left_moves_back_a_word_and_typing_goes_there(self):
+        win = FakeWindow(["a", "b", " ", "c", "d", "\x1b", "b", "X", "\n"])
+        self.assertEqual(manager_ui.read_field(win, 5, "Prompt: "), "ab Xcd")
+
+    def test_csi_option_left_is_recognised_too(self):
+        win = FakeWindow(["a", "b", " ", "c", "d", "\x1b", "[", "1", ";", "3", "D", "X", "\n"])
+        self.assertEqual(manager_ui.read_field(win, 5, "Prompt: "), "ab Xcd")
+
+    def test_unknown_alt_combination_is_ignored_and_does_not_close(self):
+        win = FakeWindow(["a", "\x1b", "q", "b", "\n"])
+        self.assertEqual(manager_ui.read_field(win, 5, "Prompt: "), "ab")
+
+    def test_esc_before_esc_stays_two_cancels(self):
+        win = FakeWindow(["\x1b", "\x1b"])
+        with self.assertRaises(manager_ui.EscapePressed):
+            manager_ui.read_field(win, 5, "Prompt: ")
+        self.assertEqual(win.keys, ["\x1b"])
+
+    def test_russian_layout_opens_new_schedule_from_the_list(self):
+        agent = {"kind": "codex", "state": "idle", "foreground_cwd": "/tmp/project"}
+        state_tmp = tempfile.TemporaryDirectory()
+        try:
+            win = FakeWindow(["т", "\x1b", "\x1b"], rows=36, cols=100)
+            with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": state_tmp.name}), \
+                    mock.patch.object(manager_ui, "resolve_target", return_value=("w1:p1", agent, None)), \
+                    mock.patch.object(manager_ui, "ensure_daemon", return_value=None), \
+                    mock.patch.object(manager_ui, "_refresh_metadata", return_value=None), \
+                    mock.patch.object(manager_ui, "suggested_when", return_value=None), \
+                    mock.patch.object(curses, "curs_set", side_effect=curses.error):
+                self.assertEqual(manager_ui._run_manager(win), 0)
+            self.assertTrue(any("New schedule" in text for _y, _x, text in win.draws))
+        finally:
+            state_tmp.cleanup()
+
+
+class MultiRowPromptTests(unittest.TestCase):
+    def test_wraps_at_line_breaks_and_width(self):
+        b = manager_ui.LineBuffer.from_text("abcdef\nxy")
+        rows, cursor_row, cursor_col = b.wrapped_rows(3)
+        self.assertEqual(rows, ["abc", "def", "xy"])
+        self.assertEqual((cursor_row, cursor_col), (2, 2))
+
+    def test_shows_three_rows_and_scrolls_to_keep_the_cursor_visible(self):
+        b = manager_ui.LineBuffer.from_text("a\nb\nc\nd\ne")
+        visible, cursor_row, _ = b.multiline_view(10, 3)
+        self.assertEqual(visible, ["c", "d", "e"])
+        self.assertEqual(cursor_row, 2)
+        b.cursor = 0
+        visible, cursor_row, _ = b.multiline_view(10, 3)
+        self.assertEqual(visible, ["a", "b", "c"])
+        self.assertEqual(cursor_row, 0)
+
+    def test_form_field_draws_one_row_per_visible_line_and_scrolls(self):
+        win = FakeWindow(rows=36, cols=60)
+        buffer = manager_ui.LineBuffer.from_text("a\nb\nc\nd")
+        manager_ui._draw_form_field(win, 8, "Prompt", buffer, "Continue", True, 60, rows=3)
+        drawn = {(y, text) for y, _x, text in win.draws}
+        self.assertIn((8, "b"), drawn)
+        self.assertIn((9, "c"), drawn)
+        self.assertIn((10, "d"), drawn)
+        self.assertNotIn((8, "a"), drawn)
+
+    def test_short_text_is_padded_to_the_field_height(self):
+        visible, _, _ = manager_ui.LineBuffer.from_text("one").multiline_view(10, 3)
+        self.assertEqual(visible, ["one", "", ""])
 
 
 class ManagerDisplayTests(unittest.TestCase):

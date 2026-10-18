@@ -48,6 +48,13 @@ ACTION_HOTKEYS = {
     "Close": "Q",
 }
 BUTTONS = tuple(ACTION_HOTKEYS)
+# Letters of the Russian keyboard in the position of the QWERTY key they share.
+RU_TO_LATIN = dict(zip("йцукенгшщзхъфывапролджэячсмитьбю", "qwertyuiop[]asdfghjkl;'zxcvbnm,."))
+# Option (Alt) combinations in text fields, as terminals send them.
+META_ERASE_WORD = {"\x1b\x7f", "\x1b\b"}
+META_WORD_LEFT = {"\x1bb", "\x1b[1;3D", "\x1b[1;5D"}
+META_WORD_RIGHT = {"\x1bf", "\x1b[1;3C", "\x1b[1;5C"}
+PROMPT_ROWS = 3
 ACCENT_PAIR = 1
 _accent_attr = 0
 
@@ -109,6 +116,7 @@ LINE_BREAK_GLYPH = "↵"
 class LineBuffer:
     chars: list[str]
     cursor: int = 0
+    top: int = 0  # first visible row of a multi-row field
 
     @classmethod
     def empty(cls) -> "LineBuffer":
@@ -172,6 +180,57 @@ class LineBuffer:
         if start != self.cursor:
             del self.chars[start:self.cursor]
             self.cursor = start
+
+    def word_left(self) -> None:
+        pos = self.cursor
+        while pos > 0 and self.chars[pos - 1].isspace():
+            pos -= 1
+        while pos > 0 and not self.chars[pos - 1].isspace():
+            pos -= 1
+        self.cursor = pos
+
+    def word_right(self) -> None:
+        pos = self.cursor
+        count = len(self.chars)
+        while pos < count and self.chars[pos].isspace():
+            pos += 1
+        while pos < count and not self.chars[pos].isspace():
+            pos += 1
+        self.cursor = pos
+
+    def wrapped_rows(self, width: int) -> tuple[list[str], int, int]:
+        """Split the text at line breaks and every `width` cells; return the rows and the cursor's row and column."""
+        width = max(1, width)
+        rows = [""]
+        cursor_row = cursor_col = 0
+        col = 0
+        for index, char in enumerate(self.chars + [""]):
+            if index == self.cursor:
+                cursor_row, cursor_col = len(rows) - 1, col
+            if char == "":
+                break
+            if char == "\n":
+                rows.append("")
+                col = 0
+                continue
+            if col >= width:
+                rows.append("")
+                col = 0
+            rows[-1] += char
+            col += 1
+        return rows, cursor_row, cursor_col
+
+    def multiline_view(self, width: int, height: int) -> tuple[list[str], int, int]:
+        """Visible rows for a field of `height` rows, scrolled so the cursor row stays on screen."""
+        rows, cursor_row, cursor_col = self.wrapped_rows(width)
+        if cursor_row < self.top:
+            self.top = cursor_row
+        elif cursor_row >= self.top + height:
+            self.top = cursor_row - height + 1
+        self.top = max(0, min(self.top, len(rows) - height))
+        visible = rows[self.top:self.top + height]
+        visible += [""] * (height - len(visible))
+        return visible, cursor_row - self.top, cursor_col
 
     def viewport(self, width: int, placeholder: str = "") -> tuple[str, int]:
         width = max(1, width)
@@ -465,6 +524,51 @@ def _set_cursor(visible: bool) -> None:
         pass
 
 
+def _latin_key(key: Any) -> Any:
+    """Map a key typed on a non-Latin layout to the Latin key in the same position."""
+    if isinstance(key, str) and len(key) == 1:
+        return RU_TO_LATIN.get(key.lower(), key)
+    return key
+
+
+def _read_pending(win: Any) -> Any:
+    """Return the key that is already waiting, or None if nothing arrives within ESCDELAY."""
+    try:
+        win.timeout(ESCDELAY_MS)
+        return win.get_wch()
+    except curses.error:
+        return None
+    finally:
+        win.timeout(-1)
+
+
+def _get_key(win: Any) -> Any:
+    """Read one key. Esc followed at once by another key is an Alt/Option combination, not a cancel."""
+    key = win.get_wch()
+    if key not in ("\x1b", 27):
+        return key
+    follow = _read_pending(win)
+    if follow is None:
+        return "\x1b"
+    if follow in ("\x1b", 27) or not isinstance(follow, str):
+        # A second Esc, or a special key, is left for the next read: Esc keeps its meaning.
+        win.unget_wch(follow)
+        return "\x1b"
+    sequence = "\x1b" + follow
+    if follow in ("[", "O"):
+        # Parameters and the final byte of a CSI or SS3 sequence, such as Option+Left as ESC [ 1 ; 3 D.
+        while len(sequence) < 12:
+            nxt = _read_pending(win)
+            if not isinstance(nxt, str):
+                if nxt is not None:
+                    win.unget_wch(nxt)
+                break
+            sequence += nxt
+            if len(sequence) > 2 and "@" <= nxt <= "~":
+                break
+    return sequence
+
+
 def _field_key(buffer: LineBuffer, key: Any) -> bool:
     if key in (curses.KEY_BACKSPACE, "\x7f", "\b", 127, 8):
         buffer.backspace()
@@ -486,6 +590,15 @@ def _field_key(buffer: LineBuffer, key: Any) -> bool:
         buffer.clear()
     elif key == "\x17":
         buffer.erase_word()
+    elif key in META_ERASE_WORD:
+        buffer.erase_word()
+    elif key in META_WORD_LEFT:
+        buffer.word_left()
+    elif key in META_WORD_RIGHT:
+        buffer.word_right()
+    elif isinstance(key, str) and key.startswith("\x1b"):
+        # Other Alt/Option combinations are not text, and must not close the field either.
+        pass
     elif isinstance(key, str) and key >= " ":
         buffer.insert(key)
     else:
@@ -514,7 +627,7 @@ def read_field(win: Any, y: int, label: str, default: str = "", *, prefill: bool
         except curses.error:
             pass
         win.refresh()
-        key = win.get_wch()
+        key = _get_key(win)
         if key in ("\n", "\r", curses.KEY_ENTER):
             return buffer.value if buffer.value else default
         if key in ("\x1b", 27):
@@ -796,21 +909,30 @@ def _render_main(
 
 
 def _draw_form_field(win: Any, y: int, label: str, buffer: LineBuffer, placeholder: str,
-                     focused: bool, width: int) -> None:
+                     focused: bool, width: int, rows: int = 1) -> None:
     label_width = 12
     field_x = min(label_width, max(0, width - 2))
     field_width = max(8, width - field_x - 4)
-    text, cursor_col = buffer.viewport(field_width, placeholder)
     attr = curses.A_REVERSE if focused else 0
+    if rows == 1:
+        text, cursor_col = buffer.viewport(field_width, placeholder)
+        lines, cursor_row = [text], 0
+    else:
+        # A multi-row field wraps the text and scrolls so the cursor row stays visible.
+        lines, cursor_row, cursor_col = buffer.multiline_view(field_width, rows)
+        if not buffer.value and placeholder:
+            lines[0] = ellipsis(placeholder, field_width)
     _safe_addstr(win, y, 2, f"{label:<10}", curses.A_BOLD)
-    _safe_addstr(win, y, field_x, "[", attr)
-    _safe_addstr(win, y, field_x + 1, " " * field_width, attr)
     value_attr = attr | (curses.A_DIM if not buffer.value and placeholder else 0)
-    _safe_addstr(win, y, field_x + 1, text, value_attr)
-    _safe_addstr(win, y, field_x + 1 + field_width, "]", attr)
+    for row, line in enumerate(lines):
+        row_y = y + row
+        _safe_addstr(win, row_y, field_x, "[", attr)
+        _safe_addstr(win, row_y, field_x + 1, " " * field_width, attr)
+        _safe_addstr(win, row_y, field_x + 1, line, value_attr)
+        _safe_addstr(win, row_y, field_x + 1 + field_width, "]", attr)
     if focused:
         try:
-            win.move(y, min(width - 2, field_x + 1 + cursor_col))
+            win.move(y + cursor_row, min(width - 2, field_x + 1 + cursor_col))
         except curses.error:
             pass
 
@@ -864,9 +986,11 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
 
         form_y = 6
         _draw_form_field(win, form_y, "When", when_buffer, "15h", focus == 0, content_width)
-        _draw_form_field(win, form_y + 2, "Prompt", prompt_buffer, "Continue", focus == 1, content_width)
+        _draw_form_field(win, form_y + 2, "Prompt", prompt_buffer, "Continue", focus == 1, content_width,
+                         rows=PROMPT_ROWS)
         examples = "Examples: 15h · 1h30m · 21:30 · fri 18:00 · tomorrow 09:00"
-        _safe_addstr(win, form_y + 4, 2, ellipsis(examples, max(8, content_width - 2)), curses.A_DIM)
+        _safe_addstr(win, form_y + 2 + PROMPT_ROWS + 1, 2, ellipsis(examples, max(8, content_width - 2)),
+                     curses.A_DIM)
 
         if error:
             _safe_addstr(
@@ -886,7 +1010,7 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
         win.refresh()
         _set_cursor(focus in (0, 1))
 
-        key = win.get_wch()
+        key = _get_key(win)
         if key == curses.KEY_MOUSE:
             try:
                 _id, mouse_x, mouse_y, _z, bstate = curses.getmouse()
@@ -897,7 +1021,7 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
             if mouse_y == form_y:
                 focus = 0
                 continue
-            if mouse_y == form_y + 2:
+            if form_y + 2 <= mouse_y < form_y + 2 + PROMPT_ROWS:
                 focus = 1
                 continue
             if mouse_y == buttons_y and cancel_x <= mouse_x < cancel_x + len("[ Cancel ]"):
@@ -1006,7 +1130,7 @@ def _confirm(win: Any, title: str, body: str, yes_label: str) -> bool:
         win.refresh()
         _set_cursor(False)
 
-        key = win.get_wch()
+        key = _get_key(win)
         if key == curses.KEY_MOUSE:
             try:
                 _id, mouse_x, mouse_y, _z, bstate = curses.getmouse()
@@ -1137,7 +1261,7 @@ def _show_details(win: Any, job: dict[str, Any]) -> None:
         win.refresh()
         _set_cursor(False)
 
-        key = win.get_wch()
+        key = _latin_key(_get_key(win))
         if key in ("\n", "\r", curses.KEY_ENTER, "\x1b", 27, "q", "Q"):
             return
         if key == curses.KEY_RESIZE:
@@ -1272,7 +1396,7 @@ def _run_manager(win: Any) -> int:
         jobs = read_jobs()
         lines, row_hits, button_hits = _render_main(win, pane, agent, target_error, jobs, state)
         state.banner = None
-        key = win.get_wch()
+        key = _latin_key(_get_key(win))
 
         if key in ("\x1b", 27):
             return 0
