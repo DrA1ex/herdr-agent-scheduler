@@ -32,7 +32,7 @@ from scheduler_core import (  # noqa: E402
     job_matches_target,
     live_agent_snapshot,
     locked_jobs,
-    parse_codex_5h_reset,
+    parse_codex_reset,
     parse_when,
     read_jobs,
     same_session,
@@ -78,34 +78,53 @@ class ParseWhenTests(unittest.TestCase):
 
 
 CODEX_STATUS = """\
-  5h limit:            [█░░░░░░░░░░░░░░░░░░░] 4% left (resets 00:01 on 19 Oct)
-  Weekly limit:        [████████████░░░░░░░░] 58% left (resets 01:57 on 25 Oct)
+  5h limit:            [███████████████████░] 97% left (resets 05:05)
+  Weekly limit:        [███████████░░░░░░░░░] 57% left (resets 01:57 on 25 Oct)
+"""
+CODEX_WEEKLY_EXHAUSTED = """\
+  5h limit:            [░░░░░░░░░░░░░░░░░░░░] 0% left (resets 05:05)
+  Weekly limit:        [░░░░░░░░░░░░░░░░░░░░] 0% left (resets 01:57 on 25 Oct)
 """
 
 
 class CodexResetParseTests(unittest.TestCase):
-    def test_reads_5h_reset_and_ignores_weekly_line(self):
+    def test_undated_5h_reset_is_the_next_clock_time_today(self):
+        now = dt.datetime(2026, 10, 19, 0, 10, tzinfo=TZ)
+        self.assertEqual(parse_codex_reset(CODEX_STATUS, now), dt.datetime(2026, 10, 19, 5, 5, tzinfo=TZ))
+
+    def test_undated_clock_time_already_passed_means_tomorrow(self):
+        now = dt.datetime(2026, 10, 19, 6, 0, tzinfo=TZ)
+        self.assertEqual(parse_codex_reset(CODEX_STATUS, now), dt.datetime(2026, 10, 20, 5, 5, tzinfo=TZ))
+
+    def test_dated_5h_reset_uses_the_printed_date(self):
         now = dt.datetime(2026, 10, 18, 21, 40, tzinfo=TZ)
+        text = "  5h limit: [..] 4% left (resets 00:01 on 19 Oct)"
+        self.assertEqual(parse_codex_reset(text, now), dt.datetime(2026, 10, 19, 0, 1, tzinfo=TZ))
+
+    def test_exhausted_weekly_limit_wins_over_5h(self):
+        now = dt.datetime(2026, 10, 19, 0, 10, tzinfo=TZ)
         self.assertEqual(
-            parse_codex_5h_reset(CODEX_STATUS, now),
-            dt.datetime(2026, 10, 19, 0, 1, tzinfo=TZ),
+            parse_codex_reset(CODEX_WEEKLY_EXHAUSTED, now),
+            dt.datetime(2026, 10, 25, 1, 57, tzinfo=TZ),
         )
 
-    def test_returns_none_when_reset_already_passed(self):
-        now = dt.datetime(2026, 10, 19, 6, 0, tzinfo=TZ)
-        self.assertIsNone(parse_codex_5h_reset(CODEX_STATUS, now))
+    def test_try_again_message_gives_the_retry_time(self):
+        now = dt.datetime(2026, 10, 18, 22, 0, tzinfo=TZ)
+        text = "You've hit your usage limit. try again at Oct 19th, 2026 12:01 AM."
+        self.assertEqual(parse_codex_reset(text, now), dt.datetime(2026, 10, 19, 0, 1, tzinfo=TZ))
 
-    def test_returns_none_without_status_line(self):
+    def test_returns_none_when_dated_reset_already_passed(self):
+        now = dt.datetime(2026, 10, 19, 6, 0, tzinfo=TZ)
+        self.assertIsNone(parse_codex_reset("  5h limit: [..] 4% left (resets 00:01 on 19 Oct)", now))
+
+    def test_returns_none_without_limit_lines(self):
         now = dt.datetime(2026, 10, 18, 21, 40, tzinfo=TZ)
-        self.assertIsNone(parse_codex_5h_reset("Weekly limit: 58% left (resets 01:57 on 25 Oct)", now))
+        self.assertIsNone(parse_codex_reset("just some pane output", now))
 
     def test_date_in_january_read_from_late_december_moves_to_next_year(self):
         now = dt.datetime(2026, 12, 31, 23, 0, tzinfo=TZ)
-        text = "5h limit: [..] 4% left (resets 00:30 on 1 Jan)"
-        self.assertEqual(
-            parse_codex_5h_reset(text, now),
-            dt.datetime(2027, 1, 1, 0, 30, tzinfo=TZ),
-        )
+        text = "  5h limit: [..] 4% left (resets 00:30 on 1 Jan)"
+        self.assertEqual(parse_codex_reset(text, now), dt.datetime(2027, 1, 1, 0, 30, tzinfo=TZ))
 
 
 class SessionAndTargetTests(unittest.TestCase):

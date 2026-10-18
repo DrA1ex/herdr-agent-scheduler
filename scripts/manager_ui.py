@@ -26,7 +26,7 @@ from scheduler_core import (  # noqa: E402
     job_matches_target,
     live_agent_snapshot,
     local_now,
-    parse_codex_5h_reset,
+    parse_codex_reset,
     parse_when,
     read_jobs,
     run_herdr,
@@ -827,7 +827,7 @@ def suggested_when(pane: str | None, agent: dict[str, Any] | None) -> str | None
         return None
     if proc.returncode != 0:
         return None
-    reset = parse_codex_5h_reset(proc.stdout, local_now())
+    reset = parse_codex_reset(proc.stdout, local_now())
     if reset is None:
         return None
     return (reset + dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")

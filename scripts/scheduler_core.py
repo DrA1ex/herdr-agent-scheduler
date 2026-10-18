@@ -105,8 +105,14 @@ def parse_when(spec: str, now: dt.datetime | None = None) -> dt.datetime:
     raise ValueError("use 15h, 1h30m, HH:MM, fri 18:00, tomorrow 09:00, or YYYY-MM-DD HH:MM")
 
 
-CODEX_5H_RESET_RE = re.compile(
-    r"5h limit:.*?resets\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})\s+on\s+(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3})",
+CODEX_LIMIT_RE = re.compile(
+    r"^\s*(?P<kind>5h|Weekly) limit:.*?(?P<left>\d+)% left \(resets (?P<hour>\d{1,2}):(?P<minute>\d{2})"
+    r"(?: on (?P<day>\d{1,2}) (?P<month>[A-Za-z]{3}))?\)",
+    re.I | re.M,
+)
+CODEX_RETRY_RE = re.compile(
+    r"try again at (?P<month>[A-Za-z]{3})[A-Za-z]*\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,\s*(?P<year>\d{4})"
+    r"\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM)",
     re.I,
 )
 MONTH_NUMBERS = {
@@ -117,24 +123,52 @@ MONTH_NUMBERS = {
 }
 
 
-def parse_codex_5h_reset(text: str, now: dt.datetime) -> dt.datetime | None:
-    """Return the next 5-hour window reset from Codex `/status` output, if it is still ahead."""
-    for match in reversed(list(CODEX_5H_RESET_RE.finditer(text))):
-        month = MONTH_NUMBERS.get(match.group("month").lower())
-        if month is None:
-            continue
-        try:
-            candidate = dt.datetime(
-                now.year, month, int(match.group("day")),
-                int(match.group("hour")), int(match.group("minute")), tzinfo=now.tzinfo,
-            )
-        except ValueError:
-            continue
+def _limit_reset_time(now: dt.datetime, hour: int, minute: int, month: int | None = None,
+                      day: int | None = None, year: int | None = None) -> dt.datetime | None:
+    if month is None:
+        # No date printed means today, or the next occurrence of that clock time.
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return candidate if candidate > now else candidate + dt.timedelta(days=1)
+    try:
+        candidate = dt.datetime(year or now.year, month, day, hour, minute, tzinfo=now.tzinfo)
+    except ValueError:
+        return None
+    if year is None and candidate < now - dt.timedelta(days=180):
         # A date printed in late December can be read in January: move it to next year.
-        if candidate < now - dt.timedelta(days=180):
-            candidate = candidate.replace(year=now.year + 1)
-        return candidate if candidate > now else None
-    return None
+        candidate = candidate.replace(year=now.year + 1)
+    return candidate if candidate > now else None
+
+
+def parse_codex_reset(text: str, now: dt.datetime) -> dt.datetime | None:
+    """Return the reset time to wait for in Codex output, if it is still ahead.
+
+    A "try again at" message names the limit that was just hit. Otherwise, the /status
+    lines are used: the weekly reset when the weekly limit is exhausted, else the 5-hour reset.
+    """
+    retry = list(CODEX_RETRY_RE.finditer(text))
+    if retry:
+        match = retry[-1]
+        hour = int(match.group("hour")) % 12 + (12 if match.group("ampm").upper() == "PM" else 0)
+        reset = _limit_reset_time(
+            now, hour, int(match.group("minute")), MONTH_NUMBERS.get(match.group("month").lower()),
+            int(match.group("day")), int(match.group("year")),
+        )
+        if reset is not None:
+            return reset
+
+    windows: dict[str, tuple[int, re.Match[str]]] = {}
+    for match in CODEX_LIMIT_RE.finditer(text):
+        windows[match.group("kind").lower()] = (int(match.group("left")), match)
+    weekly = windows.get("weekly")
+    chosen = weekly[1] if weekly and weekly[0] == 0 else (windows.get("5h") or (None, None))[1]
+    if chosen is None:
+        return None
+    month = chosen.group("month")
+    return _limit_reset_time(
+        now, int(chosen.group("hour")), int(chosen.group("minute")),
+        MONTH_NUMBERS.get(month.lower()) if month else None,
+        int(chosen.group("day")) if month else None,
+    )
 
 
 def state_dir() -> Path:
