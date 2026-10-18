@@ -26,6 +26,7 @@ from scheduler_core import (  # noqa: E402
     job_matches_target,
     live_agent_snapshot,
     local_now,
+    parse_claude_reset,
     parse_codex_reset,
     parse_when,
     read_jobs,
@@ -938,8 +939,14 @@ def _draw_form_field(win: Any, y: int, label: str, buffer: LineBuffer, placehold
 
 
 def suggested_when(pane: str | None, agent: dict[str, Any] | None) -> str | None:
-    """Default time for a new Codex schedule: the 5-hour limit reset plus five minutes, if its /status is on screen."""
-    if not pane or not agent or not is_codex(agent):
+    """Default time for a new schedule: the limit reset plus five minutes, if the pane shows one."""
+    if not pane or not agent:
+        return None
+    if is_codex(agent):
+        parse_reset = parse_codex_reset
+    elif agent_kind(agent) == "claude":
+        parse_reset = parse_claude_reset
+    else:
         return None
     herdr, socket_path = _herdr_context()
     try:
@@ -949,7 +956,7 @@ def suggested_when(pane: str | None, agent: dict[str, Any] | None) -> str | None
         return None
     if proc.returncode != 0:
         return None
-    reset = parse_codex_reset(proc.stdout, local_now())
+    reset = parse_reset(proc.stdout, local_now())
     if reset is None:
         return None
     return (reset + dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")

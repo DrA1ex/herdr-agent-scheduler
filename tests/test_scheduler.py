@@ -32,6 +32,7 @@ from scheduler_core import (  # noqa: E402
     job_matches_target,
     live_agent_snapshot,
     locked_jobs,
+    parse_claude_reset,
     parse_codex_reset,
     parse_when,
     read_jobs,
@@ -125,6 +126,28 @@ class CodexResetParseTests(unittest.TestCase):
         now = dt.datetime(2026, 12, 31, 23, 0, tzinfo=TZ)
         text = "  5h limit: [..] 4% left (resets 00:30 on 1 Jan)"
         self.assertEqual(parse_codex_reset(text, now), dt.datetime(2027, 1, 1, 0, 30, tzinfo=TZ))
+
+
+class ClaudeResetParseTests(unittest.TestCase):
+    CLAUDE_MESSAGE = "You've hit your session limit \u00b7 resets 5:20am (Asia/Yekaterinburg)"
+
+    def test_reads_the_reset_in_the_zone_the_message_names(self):
+        # 00:10 at +03 is 02:10 at Yekaterinburg (+05); the next 05:20 there is 03:20 at +03.
+        now = dt.datetime(2026, 10, 19, 0, 10, tzinfo=TZ)
+        self.assertEqual(parse_claude_reset(self.CLAUDE_MESSAGE, now), dt.datetime(2026, 10, 19, 3, 20, tzinfo=TZ))
+
+    def test_pm_times_are_converted(self):
+        now = dt.datetime(2026, 10, 19, 10, 0, tzinfo=TZ)
+        text = "You've hit your session limit \u00b7 resets 5:40pm (Asia/Yekaterinburg)"
+        self.assertEqual(parse_claude_reset(text, now), dt.datetime(2026, 10, 19, 15, 40, tzinfo=TZ))
+
+    def test_unknown_zone_gives_no_suggestion(self):
+        now = dt.datetime(2026, 10, 19, 0, 10, tzinfo=TZ)
+        self.assertIsNone(parse_claude_reset("resets 5:20am (Mars/Olympus)", now))
+
+    def test_text_without_a_reset_gives_nothing(self):
+        now = dt.datetime(2026, 10, 19, 0, 10, tzinfo=TZ)
+        self.assertIsNone(parse_claude_reset("just some pane output", now))
 
 
 class SessionAndTargetTests(unittest.TestCase):

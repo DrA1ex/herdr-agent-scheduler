@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+import zoneinfo
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -169,6 +170,29 @@ def parse_codex_reset(text: str, now: dt.datetime) -> dt.datetime | None:
         MONTH_NUMBERS.get(month.lower()) if month else None,
         int(chosen.group("day")) if month else None,
     )
+
+
+CLAUDE_RESET_RE = re.compile(
+    r"resets\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)\b"
+    r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z0-9_+\-]+)+)\))?",
+    re.I,
+)
+
+
+def parse_claude_reset(text: str, now: dt.datetime) -> dt.datetime | None:
+    """Return the reset time from Claude Code's limit message, in the zone the message names."""
+    matches = list(CLAUDE_RESET_RE.finditer(text))
+    if not matches:
+        return None
+    match = matches[-1]
+    hour = int(match.group("hour")) % 12 + (12 if match.group("ampm").lower() == "pm" else 0)
+    zone = match.group("zone")
+    try:
+        tz = zoneinfo.ZoneInfo(zone) if zone else now.tzinfo
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return None
+    reset = _limit_reset_time(now.astimezone(tz), hour, int(match.group("minute") or 0))
+    return reset.astimezone(now.tzinfo) if reset else None
 
 
 def state_dir() -> Path:
