@@ -22,9 +22,11 @@ from scheduler_core import (  # noqa: E402
     delete_job,
     is_supported_agent,
     job_agent_kind,
+    is_codex,
     job_matches_target,
     live_agent_snapshot,
     local_now,
+    parse_codex_5h_reset,
     parse_when,
     read_jobs,
     run_herdr,
@@ -813,6 +815,24 @@ def _draw_form_field(win: Any, y: int, label: str, buffer: LineBuffer, placehold
             pass
 
 
+def suggested_when(pane: str | None, agent: dict[str, Any] | None) -> str | None:
+    """Default time for a new Codex schedule: the 5-hour limit reset plus five minutes, if its /status is on screen."""
+    if not pane or not agent or not is_codex(agent):
+        return None
+    herdr, socket_path = _herdr_context()
+    try:
+        proc = run_herdr(herdr, socket_path, ["pane", "read", pane, "--source", "recent", "--lines", "400"],
+                         timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    reset = parse_codex_5h_reset(proc.stdout, local_now())
+    if reset is None:
+        return None
+    return (reset + dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+
+
 def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
                    job: dict[str, Any] | None = None) -> tuple[str, str | None]:
     editing = job is not None
@@ -820,7 +840,8 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
         return "Cannot create a schedule: focus a live Codex or Claude Code pane first.", None
 
     original_when = format_edit_when(job) if job else ""
-    when_buffer = LineBuffer.from_text(original_when if editing else "15h")
+    default_when = "15h" if editing else (suggested_when(pane, agent) or "15h")
+    when_buffer = LineBuffer.from_text(original_when if editing else default_when)
     prompt_text = str(job.get("prompt") or "Continue") if job else ""
     prompt_buffer = LineBuffer.from_text(prompt_text) if editing else LineBuffer.empty()
     focus = 0

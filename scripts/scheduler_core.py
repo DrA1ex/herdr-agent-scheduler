@@ -105,6 +105,38 @@ def parse_when(spec: str, now: dt.datetime | None = None) -> dt.datetime:
     raise ValueError("use 15h, 1h30m, HH:MM, fri 18:00, tomorrow 09:00, or YYYY-MM-DD HH:MM")
 
 
+CODEX_5H_RESET_RE = re.compile(
+    r"5h limit:.*?resets\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})\s+on\s+(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3})",
+    re.I,
+)
+MONTH_NUMBERS = {
+    name: number
+    for number, name in enumerate(
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1
+    )
+}
+
+
+def parse_codex_5h_reset(text: str, now: dt.datetime) -> dt.datetime | None:
+    """Return the next 5-hour window reset from Codex `/status` output, if it is still ahead."""
+    for match in reversed(list(CODEX_5H_RESET_RE.finditer(text))):
+        month = MONTH_NUMBERS.get(match.group("month").lower())
+        if month is None:
+            continue
+        try:
+            candidate = dt.datetime(
+                now.year, month, int(match.group("day")),
+                int(match.group("hour")), int(match.group("minute")), tzinfo=now.tzinfo,
+            )
+        except ValueError:
+            continue
+        # A date printed in late December can be read in January: move it to next year.
+        if candidate < now - dt.timedelta(days=180):
+            candidate = candidate.replace(year=now.year + 1)
+        return candidate if candidate > now else None
+    return None
+
+
 def state_dir() -> Path:
     value = os.environ.get("HERDR_PLUGIN_STATE_DIR")
     if value:
