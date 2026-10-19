@@ -57,6 +57,8 @@ META_WORD_LEFT = {"\x1bb", "\x1b[1;3D", "\x1b[1;5D"}
 META_WORD_RIGHT = {"\x1bf", "\x1b[1;3C", "\x1b[1;5C"}
 PROMPT_ROWS = 3
 PROMPT_ROWS_MAX = 8
+RESET_TAIL_LINES = 60
+RESET_SCROLLBACK_LINES = 1000
 ACCENT_PAIR = 1
 _accent_attr = 0
 
@@ -1016,22 +1018,29 @@ def suggested_when(pane: str | None, agent: dict[str, Any] | None) -> str | None
     else:
         return None
     herdr, socket_path = _herdr_context()
-    proc = None
+    # The newest limit message or /status is normally at the very end of the pane, so read only the
+    # tail first and go back through the scrollback only when it shows nothing.
+    for lines in RESET_TAIL_LINES, RESET_SCROLLBACK_LINES:
+        text = _read_pane_text(herdr, socket_path, pane, lines)
+        if text is None:
+            return None
+        reset = parse_reset(text, local_now())
+        if reset is not None:
+            return (reset + dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+    return None
+
+
+def _read_pane_text(herdr: str, socket_path: str | None, pane: str, lines: int) -> str | None:
     # Unwrapped text keeps a limit message in one piece however narrow the pane is.
     for source in ("recent-unwrapped", "recent"):
         try:
-            proc = run_herdr(herdr, socket_path, ["pane", "read", pane, "--source", source, "--lines", "1000"],
+            proc = run_herdr(herdr, socket_path, ["pane", "read", pane, "--source", source, "--lines", str(lines)],
                              timeout=3.0)
         except (OSError, subprocess.TimeoutExpired):
             return None
         if proc.returncode == 0:
-            break
-    if proc is None or proc.returncode != 0:
-        return None
-    reset = parse_reset(proc.stdout, local_now())
-    if reset is None:
-        return None
-    return (reset + dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+            return proc.stdout
+    return None
 
 
 def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,

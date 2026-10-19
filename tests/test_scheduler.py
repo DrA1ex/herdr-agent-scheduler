@@ -745,6 +745,57 @@ class MultiRowPromptTests(unittest.TestCase):
             self.assertEqual(read_jobs()[0]["prompt"], "oneX\ntwo\nthree")
 
 
+CODEX_STATUS_SCREEN = """\
+/status
+
+  >_ OpenAI Codex (v0.161.0)
+
+  Model:               GPT-6.1-Sol (reasoning high)
+  Context window:      47% left (259K used / 475K)
+  5h limit:            [\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591] 0% left (resets 18:21)
+  Weekly limit:        [\u2588\u2588\u2588\u2588\u2588\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591] 26% left (resets 01:57 on 25 Oct)
+"""
+
+
+class SuggestedWhenTests(unittest.TestCase):
+    AGENT = {"agent": "codex"}
+
+    def _suggest(self, outputs, now=dt.datetime(2026, 10, 19, 15, 40, tzinfo=TZ)):
+        calls = []
+
+        def fake_run(_herdr, _socket, args, timeout=0):
+            calls.append(args)
+            return mock.Mock(returncode=0, stdout=outputs[min(len(calls), len(outputs)) - 1])
+
+        with mock.patch.object(manager_ui, "run_herdr", side_effect=fake_run), \
+                mock.patch.object(manager_ui, "_herdr_context", return_value=("herdr", None)), \
+                mock.patch.object(manager_ui, "local_now", return_value=now):
+            return manager_ui.suggested_when("w1:p1", self.AGENT), calls
+
+    def test_status_at_the_end_of_the_pane_is_enough_without_reading_scrollback(self):
+        result, calls = self._suggest([CODEX_STATUS_SCREEN])
+        self.assertEqual(result, "2026-10-19 18:26")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index("--lines") + 1], str(manager_ui.RESET_TAIL_LINES))
+
+    def test_limit_message_at_the_end_of_the_pane_is_enough_without_reading_scrollback(self):
+        message = "\u25a0 You\u2019ve hit your usage limit. Upgrade to Pro, or try again at 6:21 PM.\n"
+        result, calls = self._suggest([message])
+        self.assertEqual(result, "2026-10-19 18:26")
+        self.assertEqual(len(calls), 1)
+
+    def test_reads_scrollback_only_when_the_tail_shows_no_reset(self):
+        result, calls = self._suggest(["nothing here\n", CODEX_STATUS_SCREEN])
+        self.assertEqual(result, "2026-10-19 18:26")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][calls[1].index("--lines") + 1], str(manager_ui.RESET_SCROLLBACK_LINES))
+
+    def test_no_reset_anywhere_gives_no_suggestion(self):
+        result, calls = self._suggest(["nothing here\n"])
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 2)
+
+
 class MultiRowPromptRenderTests(unittest.TestCase):
     def test_prompt_shows_a_position_and_scrollbar_when_the_text_overflows(self):
         win = FakeWindow(rows=36, cols=60)
