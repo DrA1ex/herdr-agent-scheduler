@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Read the Codex limit reset from "try again at 6:21 PM" (time only) as well as dated forms, including when the message wraps across lines, and scan the last 1000 unwrapped pane lines.
+- Prompt field: ↑/↓ and PgUp/PgDn move through multi-line text (↑/↓ leave the field only from its first or last row), clicks place the cursor, the field grows with the popup and shows a scrollbar and line position.
+
 ## 0.4.0
 
 - Schedule prompts for Claude Code through the same Herdr delivery path as Codex.

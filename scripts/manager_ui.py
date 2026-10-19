@@ -56,6 +56,7 @@ META_ERASE_WORD = {"\x1b\x7f", "\x1b\b"}
 META_WORD_LEFT = {"\x1bb", "\x1b[1;3D", "\x1b[1;5D"}
 META_WORD_RIGHT = {"\x1bf", "\x1b[1;3C", "\x1b[1;5C"}
 PROMPT_ROWS = 3
+PROMPT_ROWS_MAX = 8
 ACCENT_PAIR = 1
 _accent_attr = 0
 
@@ -199,27 +200,68 @@ class LineBuffer:
             pos += 1
         self.cursor = pos
 
-    def wrapped_rows(self, width: int) -> tuple[list[str], int, int]:
-        """Split the text at line breaks and every `width` cells; return the rows and the cursor's row and column."""
+    def layout(self, width: int) -> tuple[list[str], list[int], int, int]:
+        """Split the text at line breaks and every `width` cells.
+
+        Returns the rows, the index of each row's first character, and the cursor's row and column.
+        A cursor after a full row sits at the start of the next row, as in an editor.
+        """
         width = max(1, width)
         rows = [""]
+        starts = [0]
         cursor_row = cursor_col = 0
         col = 0
         for index, char in enumerate(self.chars + [""]):
+            if col >= width and char != "\n":
+                rows.append("")
+                starts.append(index)
+                col = 0
             if index == self.cursor:
                 cursor_row, cursor_col = len(rows) - 1, col
             if char == "":
                 break
             if char == "\n":
                 rows.append("")
+                starts.append(index + 1)
                 col = 0
                 continue
-            if col >= width:
-                rows.append("")
-                col = 0
             rows[-1] += char
             col += 1
+        return rows, starts, cursor_row, cursor_col
+
+    def wrapped_rows(self, width: int) -> tuple[list[str], int, int]:
+        """Split the text at line breaks and every `width` cells; return the rows and the cursor's row and column."""
+        rows, _starts, cursor_row, cursor_col = self.layout(width)
         return rows, cursor_row, cursor_col
+
+    def move_rows(self, delta: int, width: int, *, clamp: bool = False) -> bool:
+        """Move the cursor `delta` rows up or down, keeping its column.
+
+        Returns False when there is no such row, so the caller can leave the field instead.
+        With `clamp`, a jump past the end stops at the first or last row; it fails only if already there.
+        """
+        rows, starts, cursor_row, cursor_col = self.layout(width)
+        target = cursor_row + delta
+        if not 0 <= target < len(rows):
+            if not clamp:
+                return False
+            target = max(0, min(len(rows) - 1, target))
+            if target == cursor_row:
+                return False
+        self.cursor = self._row_index(rows, starts, target, cursor_col)
+        return True
+
+    def place_cursor(self, view_row: int, col: int, width: int) -> None:
+        """Put the cursor at a column of a visible row, as when the field is clicked."""
+        rows, starts, _cursor_row, _cursor_col = self.layout(width)
+        target = max(0, min(len(rows) - 1, self.top + view_row))
+        self.cursor = self._row_index(rows, starts, target, max(0, col))
+
+    def _row_index(self, rows: list[str], starts: list[int], row: int, col: int) -> int:
+        last = len(rows[row])
+        if row < len(rows) - 1 and starts[row + 1] == starts[row] + last and last > 0:
+            last -= 1  # a wrapped row ends where the next begins: the cursor cannot sit past its last character
+        return starts[row] + min(col, last)
 
     def multiline_view(self, width: int, height: int) -> tuple[list[str], int, int]:
         """Visible rows for a field of `height` rows, scrolled so the cursor row stays on screen."""
@@ -232,6 +274,9 @@ class LineBuffer:
         visible = rows[self.top:self.top + height]
         visible += [""] * (height - len(visible))
         return visible, cursor_row - self.top, cursor_col
+
+    def row_count(self, width: int) -> int:
+        return len(self.layout(width)[0])
 
     def viewport(self, width: int, placeholder: str = "") -> tuple[str, int]:
         width = max(1, width)
@@ -909,28 +954,50 @@ def _render_main(
     return lines, row_hits, button_hits
 
 
+def _field_geometry(width: int) -> tuple[int, int]:
+    """Column of the field's left border and the width of its text area."""
+    field_x = min(12, max(0, width - 2))
+    return field_x, max(8, width - field_x - 4)
+
+
+def _prompt_rows(height: int) -> int:
+    """Rows for the Prompt field: as many as fit above the buttons, between PROMPT_ROWS and PROMPT_ROWS_MAX."""
+    return max(PROMPT_ROWS, min(PROMPT_ROWS_MAX, height - 17))
+
+
 def _draw_form_field(win: Any, y: int, label: str, buffer: LineBuffer, placeholder: str,
                      focused: bool, width: int, rows: int = 1) -> None:
-    label_width = 12
-    field_x = min(label_width, max(0, width - 2))
-    field_width = max(8, width - field_x - 4)
-    attr = curses.A_REVERSE if focused else 0
+    field_x, field_width = _field_geometry(width)
+    border = _accent(bold=True) if focused else curses.A_DIM
+    total = 1
     if rows == 1:
         text, cursor_col = buffer.viewport(field_width, placeholder)
         lines, cursor_row = [text], 0
     else:
         # A multi-row field wraps the text and scrolls so the cursor row stays visible.
         lines, cursor_row, cursor_col = buffer.multiline_view(field_width, rows)
+        total = buffer.row_count(field_width)
         if not buffer.value and placeholder:
             lines[0] = ellipsis(placeholder, field_width)
     _safe_addstr(win, y, 2, f"{label:<10}", curses.A_BOLD)
-    value_attr = attr | (curses.A_DIM if not buffer.value and placeholder else 0)
+    if rows > 1 and total > 1:
+        _safe_addstr(win, y + 1, 2, f"{buffer.top + cursor_row + 1}/{total}", curses.A_DIM)
+    value_attr = curses.A_DIM if not buffer.value and placeholder else 0
+    thumb = rows
+    thumb_top = 0
+    if total > rows:
+        thumb = max(1, rows * rows // total)
+        thumb_top = buffer.top * (rows - thumb) // max(1, total - rows)
     for row, line in enumerate(lines):
         row_y = y + row
-        _safe_addstr(win, row_y, field_x, "[", attr)
-        _safe_addstr(win, row_y, field_x + 1, " " * field_width, attr)
+        if rows == 1:
+            left, right = "[", "]"
+        else:
+            left = "│"
+            right = "┃" if total > rows and thumb_top <= row < thumb_top + thumb else "│"
+        _safe_addstr(win, row_y, field_x, left, border)
         _safe_addstr(win, row_y, field_x + 1, line, value_attr)
-        _safe_addstr(win, row_y, field_x + 1 + field_width, "]", attr)
+        _safe_addstr(win, row_y, field_x + 1 + field_width, right, border)
     if focused:
         try:
             win.move(y + cursor_row, min(width - 2, field_x + 1 + cursor_col))
@@ -949,12 +1016,17 @@ def suggested_when(pane: str | None, agent: dict[str, Any] | None) -> str | None
     else:
         return None
     herdr, socket_path = _herdr_context()
-    try:
-        proc = run_herdr(herdr, socket_path, ["pane", "read", pane, "--source", "recent", "--lines", "400"],
-                         timeout=3.0)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
+    proc = None
+    # Unwrapped text keeps a limit message in one piece however narrow the pane is.
+    for source in ("recent-unwrapped", "recent"):
+        try:
+            proc = run_herdr(herdr, socket_path, ["pane", "read", pane, "--source", source, "--lines", "1000"],
+                             timeout=3.0)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode == 0:
+            break
+    if proc is None or proc.returncode != 0:
         return None
     reset = parse_reset(proc.stdout, local_now())
     if reset is None:
@@ -992,11 +1064,13 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
         _safe_addstr(win, 3, 2, ellipsis(f"Target      {target_project or '-'} · {target_pane_id}", content_width - 2))
 
         form_y = 6
+        prompt_rows = _prompt_rows(height)
+        field_x, field_width = _field_geometry(content_width)
         _draw_form_field(win, form_y, "When", when_buffer, "15h", focus == 0, content_width)
         _draw_form_field(win, form_y + 2, "Prompt", prompt_buffer, "Continue", focus == 1, content_width,
-                         rows=PROMPT_ROWS)
+                         rows=prompt_rows)
         examples = "Examples: 15h · 1h30m · 21:30 · fri 18:00 · tomorrow 09:00"
-        _safe_addstr(win, form_y + 2 + PROMPT_ROWS + 1, 2, ellipsis(examples, max(8, content_width - 2)),
+        _safe_addstr(win, form_y + 2 + prompt_rows + 1, 2, ellipsis(examples, max(8, content_width - 2)),
                      curses.A_DIM)
 
         if error:
@@ -1012,7 +1086,8 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
         save_x = max(cancel_x + 12, width - 13)
         _safe_addstr(win, buttons_y, cancel_x, "[ Cancel ]", cancel_attr)
         _safe_addstr(win, buttons_y, save_x, "[ Save ]", save_attr)
-        hint = "Tab/↑↓ move  Enter new line  Esc back" if focus == 1 else "Tab/↑↓ move  Enter activate  Esc back"
+        hint = ("↑↓ PgUp/PgDn move in text  Tab next field  Enter new line  Esc back" if focus == 1
+                else "Tab/↑↓ move  Enter activate  Esc back")
         _safe_addstr(win, height - 1, 0, ellipsis(hint, content_width), curses.A_DIM)
         win.refresh()
         _set_cursor(focus in (0, 1))
@@ -1028,8 +1103,9 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
             if mouse_y == form_y:
                 focus = 0
                 continue
-            if form_y + 2 <= mouse_y < form_y + 2 + PROMPT_ROWS:
+            if form_y + 2 <= mouse_y < form_y + 2 + prompt_rows:
                 focus = 1
+                prompt_buffer.place_cursor(mouse_y - form_y - 2, mouse_x - field_x - 1, field_width)
                 continue
             if mouse_y == buttons_y and cancel_x <= mouse_x < cancel_x + len("[ Cancel ]"):
                 focus = 2
@@ -1044,6 +1120,14 @@ def _schedule_form(win: Any, pane: str | None, agent: dict[str, Any] | None,
             return "Edit discarded." if editing else "New schedule cancelled.", selected_id
         if key == curses.KEY_RESIZE:
             continue
+        if focus == 1 and key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+            # Inside Prompt the arrows walk the text; they leave the field only from its first or last row.
+            step = -1 if key in (curses.KEY_UP, curses.KEY_PPAGE) else 1
+            paging = key in (curses.KEY_PPAGE, curses.KEY_NPAGE)
+            if prompt_buffer.move_rows(step * (prompt_rows if paging else 1), field_width, clamp=paging):
+                continue
+            if paging:
+                continue
         if key in ("\t", curses.KEY_DOWN):
             focus = (focus + 1) % 4
             continue

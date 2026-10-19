@@ -114,6 +114,41 @@ class CodexResetParseTests(unittest.TestCase):
         text = "You've hit your usage limit. try again at Oct 19th, 2026 12:01 AM."
         self.assertEqual(parse_codex_reset(text, now), dt.datetime(2026, 10, 19, 0, 1, tzinfo=TZ))
 
+    def test_try_again_with_only_a_clock_time_wrapped_across_lines(self):
+        now = dt.datetime(2026, 10, 19, 15, 35, tzinfo=TZ)
+        text = (
+            "\u25a0 You\u2019ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/\n"
+            "settings/usage to purchase more credits or try again at 6:21 PM.\n\n"
+        )
+        self.assertEqual(parse_codex_reset(text, now), dt.datetime(2026, 10, 19, 18, 21, tzinfo=TZ))
+        wrapped = text.replace("try again at 6:21 PM", "try again at\n  6:21 PM")
+        self.assertEqual(parse_codex_reset(wrapped, now), dt.datetime(2026, 10, 19, 18, 21, tzinfo=TZ))
+
+    def test_try_again_clock_time_that_has_passed_means_tomorrow(self):
+        now = dt.datetime(2026, 10, 19, 19, 0, tzinfo=TZ)
+        self.assertEqual(
+            parse_codex_reset("or try again at 6:21 PM.", now), dt.datetime(2026, 10, 20, 18, 21, tzinfo=TZ)
+        )
+
+    def test_try_again_with_a_date_but_no_year(self):
+        now = dt.datetime(2026, 10, 19, 15, 35, tzinfo=TZ)
+        self.assertEqual(
+            parse_codex_reset("try again at Oct 22nd, 9:05 AM.", now), dt.datetime(2026, 10, 22, 9, 5, tzinfo=TZ)
+        )
+
+    def test_try_again_date_formats(self):
+        now = dt.datetime(2026, 10, 19, 15, 35, tzinfo=TZ)
+        expected = dt.datetime(2026, 10, 22, 9, 5, tzinfo=TZ)
+        for text in (
+            "try again at Oct 22nd, 2026 9:05 AM.",
+            "try again at Oct 22, 9:05 AM.",
+            "try again at October 22nd at 9:05 AM.",
+            "try again at 22 Oct 2026, 9:05 AM.",
+            "try again at 22 Oct 09:05.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(parse_codex_reset(text, now), expected)
+
     def test_returns_none_when_dated_reset_already_passed(self):
         now = dt.datetime(2026, 10, 19, 6, 0, tzinfo=TZ)
         self.assertIsNone(parse_codex_reset("  5h limit: [..] 4% left (resets 00:01 on 19 Oct)", now))
@@ -661,6 +696,63 @@ class MultiRowPromptTests(unittest.TestCase):
         self.assertIn((9, "c"), drawn)
         self.assertIn((10, "d"), drawn)
         self.assertNotIn((8, "a"), drawn)
+
+    def test_up_and_down_move_the_cursor_between_rows_keeping_the_column(self):
+        b = manager_ui.LineBuffer.from_text("abcd\nxy\nklmno")
+        self.assertTrue(b.move_rows(-1, 10))  # from the end of "klmno" (col 5) to the end of "xy"
+        self.assertEqual(b.cursor, 7)
+        self.assertTrue(b.move_rows(-1, 10))
+        self.assertEqual(b.cursor, 2)
+        self.assertFalse(b.move_rows(-1, 10))  # already on the first row
+        self.assertTrue(b.move_rows(2, 10))
+        self.assertEqual(b.cursor, 10)
+        self.assertFalse(b.move_rows(1, 10))
+
+    def test_vertical_move_across_a_wrapped_row_never_lands_past_its_last_character(self):
+        b = manager_ui.LineBuffer.from_text("abcdef")
+        b.cursor = 5
+        self.assertTrue(b.move_rows(-1, 3))
+        self.assertEqual(b.cursor, 2)
+
+    def test_page_move_stops_at_the_last_row(self):
+        b = manager_ui.LineBuffer.from_text("a\nb\nc\nd")
+        b.cursor = 0
+        self.assertTrue(b.move_rows(10, 10, clamp=True))
+        self.assertEqual(b.cursor, 6)
+        self.assertFalse(b.move_rows(10, 10, clamp=True))
+
+    def test_click_places_the_cursor_in_the_visible_row(self):
+        b = manager_ui.LineBuffer.from_text("a\nb\nc\nd\ne")
+        b.multiline_view(10, 3)  # scrolls to c, d, e
+        b.place_cursor(1, 0, 10)
+        self.assertEqual(b.cursor, 6)
+
+    def test_arrows_walk_the_prompt_text_and_leave_it_from_the_edges(self):
+        codex = {"agent": "codex", "agent_status": "idle", "foreground_cwd": "/tmp/project",
+                 "agent_session": {"agent": "codex", "kind": "id", "value": "codex-session"}}
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": td}), \
+                mock.patch.object(manager_ui, "ensure_daemon"), \
+                mock.patch.object(manager_ui, "_refresh_metadata"), \
+                mock.patch.object(manager_ui, "_notify"), \
+                mock.patch.object(curses, "curs_set", side_effect=curses.error):
+            keys = ["\n", *"one", "\n", *"two", "\n", *"three",
+                    curses.KEY_UP, curses.KEY_UP, *"X",
+                    curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN,  # two rows, then out of Prompt
+                    curses.KEY_RIGHT, "\n"]                              # Cancel -> Save
+            win = FakeWindow(keys, rows=36, cols=100)
+            manager_ui._schedule_form(win, "w1:p1", codex)
+            self.assertEqual(read_jobs()[0]["prompt"], "oneX\ntwo\nthree")
+
+
+class MultiRowPromptRenderTests(unittest.TestCase):
+    def test_prompt_shows_a_position_and_scrollbar_when_the_text_overflows(self):
+        win = FakeWindow(rows=36, cols=60)
+        buffer = manager_ui.LineBuffer.from_text("a\nb\nc\nd\ne\nf")
+        manager_ui._draw_form_field(win, 8, "Prompt", buffer, "Continue", True, 60, rows=3)
+        drawn = {(y, text) for y, _x, text in win.draws}
+        self.assertIn((9, "6/6"), drawn)
+        self.assertTrue(any(text == "\u2503" for _y, _x, text in win.draws))
 
     def test_short_text_is_padded_to_the_field_height(self):
         visible, _, _ = manager_ui.LineBuffer.from_text("one").multiline_view(10, 3)

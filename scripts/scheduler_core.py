@@ -112,8 +112,13 @@ CODEX_LIMIT_RE = re.compile(
     re.I | re.M,
 )
 CODEX_RETRY_RE = re.compile(
-    r"try again at (?P<month>[A-Za-z]{3})[A-Za-z]*\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,\s*(?P<year>\d{4})"
-    r"\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM)",
+    # Two shapes: a bare time ("try again at 6:21 PM.") and a dated one ("Oct 19th, 2026 12:01 AM",
+    # "Oct 22, 9:05 AM", "22 Oct 9:05 AM"). Whitespace includes line breaks: the message wraps in a narrow pane.
+    r"try\s+again\s+at\s+"
+    r"(?:(?:(?P<month>[A-Za-z]{3})[A-Za-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?"
+    r"|(?P<day2>\d{1,2})(?:st|nd|rd|th)?\s+(?P<month2>[A-Za-z]{3})[A-Za-z]*\.?)"
+    r",?\s*(?:(?P<year>\d{4}),?\s*)?(?:at\s+)?)?"
+    r"(?P<hour>\d{1,2}):(?P<minute>\d{2})(?:\s*(?P<ampm>AM|PM)\b)?",
     re.I,
 )
 MONTH_NUMBERS = {
@@ -149,10 +154,17 @@ def parse_codex_reset(text: str, now: dt.datetime) -> dt.datetime | None:
     retry = list(CODEX_RETRY_RE.finditer(text))
     if retry:
         match = retry[-1]
-        hour = int(match.group("hour")) % 12 + (12 if match.group("ampm").upper() == "PM" else 0)
+        hour = int(match.group("hour"))
+        ampm = match.group("ampm")
+        if ampm:
+            hour = hour % 12 + (12 if ampm.upper() == "PM" else 0)
+        month = match.group("month") or match.group("month2")
+        day = match.group("day") or match.group("day2")
         reset = _limit_reset_time(
-            now, hour, int(match.group("minute")), MONTH_NUMBERS.get(match.group("month").lower()),
-            int(match.group("day")), int(match.group("year")),
+            now, hour, int(match.group("minute")),
+            MONTH_NUMBERS.get(month.lower()) if month else None,
+            int(day) if month else None,
+            int(match.group("year")) if match.group("year") else None,
         )
         if reset is not None:
             return reset
